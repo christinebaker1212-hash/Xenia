@@ -5,12 +5,16 @@ name: Release
 #   * change the VERSION file and push (any branch) -> releases v<VERSION>
 #   * push a tag such as v1.2.3
 #   * run this workflow manually with a version number
-# A version that already has a release is skipped.
+# A version that already has a published release is skipped.
+#
+# Builds are attached straight to a draft release (no workflow artifacts, so
+# the Actions artifact storage quota does not matter), and the draft is
+# published only after every platform uploaded successfully.
 on:
   push:
     tags: ["v*"]
     branches: ["**"]
-    paths: ["VERSION"]
+    paths: ["VERSION", ".github/workflows/release.yml"]
   workflow_dispatch:
     inputs:
       version:
@@ -20,12 +24,16 @@ on:
 permissions:
   contents: write
 
+env:
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
-      exists: ${{ steps.check.outputs.exists }}
+      skip: ${{ steps.check.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
       - name: Work out the version
@@ -37,21 +45,27 @@ jobs:
           else v="$(tr -d ' \r\n' < VERSION)"; v="${v#v}"; fi
           if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then echo "Bad version '$v'"; exit 1; fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-      - name: Skip versions that are already released
+      - name: Create a draft release (skip if already published)
         id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          if gh api "repos/${{ github.repository }}/releases/tags/v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
-            echo "Release v${{ steps.ver.outputs.version }} already exists, nothing to do."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          tag="v${{ steps.ver.outputs.version }}"
+          state="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo none)"
+          if [ "$state" = "false" ]; then
+            echo "Release $tag is already published, nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [ "$state" = "true" ]; then
+            gh release delete "$tag" --yes   # leftover draft from a failed run
+          fi
+          gh release create "$tag" --draft --target "${{ github.sha }}" \
+            --title "Protect Me Knight PC $tag" --generate-notes
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
-    if: needs.prepare.outputs.exists != 'true'
+    if: needs.prepare.outputs.skip != 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -90,24 +104,13 @@ jobs:
         if: runner.os != 'Windows'
         run: cd out/${{ matrix.rid }} && chmod +x ProtectMeKnight && zip -qr ../../ProtectMeKnightPC-${{ matrix.rid }}.zip .
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ProtectMeKnightPC-${{ matrix.rid }}
-          path: ProtectMeKnightPC-${{ matrix.rid }}.zip
+      - name: Attach to the draft release
+        shell: bash
+        run: gh release upload "v${{ needs.prepare.outputs.version }}" "ProtectMeKnightPC-${{ matrix.rid }}.zip" --clobber
 
-  release:
+  publish:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.prepare.outputs.version }}
-          name: Protect Me Knight PC v${{ needs.prepare.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          files: dist/*.zip
+      - name: Publish the release
+        run: gh release edit "v${{ needs.prepare.outputs.version }}" --draft=false --latest
