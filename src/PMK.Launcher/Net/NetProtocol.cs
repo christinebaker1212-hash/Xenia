@@ -20,10 +20,20 @@ namespace PMK.Launcher.Net
         Ping = 9,
         Pong = 10,
         Desync = 11,
+        PeerStatus = 12,   // u8 id, u8 connected: a player dropped and may reconnect
+        Bye = 13,          // leaving on purpose (no reconnect wait)
+    }
+
+    public enum RejectCode : byte
+    {
+        Other = 0,
+        Password = 1,      // a password is needed, or the one given was wrong
+        Dropped = 2,       // reconnecting too late: the session went on without you
     }
 
     public sealed class NetStartInfo
     {
+        public ulong SessionId;
         public int Seed;
         public int InputDelay;
         /// <summary>Peer id that owns each of the four player slots (255 = empty).</summary>
@@ -33,7 +43,7 @@ namespace PMK.Launcher.Net
     /// <summary>Message encoding helpers. Every message is [u16 length][u8 type][payload].</summary>
     public static class NetProtocol
     {
-        public const ushort Version = 1;
+        public const ushort Version = 2;
         public const int StateSize = 9;
 
         public static byte[] Build(MsgType type, Action<BinaryWriter> body)

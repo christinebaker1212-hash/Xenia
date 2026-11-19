@@ -30,6 +30,11 @@ namespace PMK.Launcher
         // Online
         public string PlayerName { get; set; } = Environment.UserName;
         public string LastJoinAddress { get; set; } = "";
+        /// <summary>The host's name for REJOIN, and the room key that got us in (hex SHA-256, no password stored).</summary>
+        public string LastJoinName { get; set; } = "";
+        public string LastJoinKey { get; set; } = "";
+        /// <summary>Password friends need to join games you host (empty = none).</summary>
+        public string RoomPassword { get; set; } = "";
         public int Port { get; set; } = 47820;
         public int InputDelayFrames { get; set; } = 3;
         public int LocalPlayers { get; set; } = 1;

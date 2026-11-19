@@ -61,28 +61,55 @@ bindings, online settings, automatic update checks. Saved in `data/settings.json
 
 ## Online play
 
-Up to 4 players over the internet, with any mix of players per PC (for example 2 on
-one PC and 2 on another).
+Up to 4 players over the internet or a home network, with any mix of players per
+PC (for example 2 on one PC and 2 on another). The connection handling follows
+*Moemon Emerald Kai Co-op*.
 
-* **Host:** main menu → *Online: host a game*. The lobby shows addresses to share.
-  The host needs TCP port **47820** reachable. The port is forwarded automatically
-  when the router supports UPnP; otherwise forward it manually or use a VPN such as
-  Tailscale, ZeroTier or Radmin VPN and share that address.
-* **Join:** main menu → *Online: join a game*, then type the host's address
-  (`1.2.3.4` or `1.2.3.4:47820`). Ctrl+V pastes.
-* **Players per PC:** Options → Online settings → *Players on this PC* (1–4).
-  Those players use controllers 1..n on that PC (and the keyboard, if it is assigned
-  to one of them).
-* The host presses *Start game*. Everyone boots the game together and plays it from
-  the cartridge intro onward.
+**Hosting:** main menu, then *Online: host a game*.
+* The game asks your router to open its port (UPnP, or NAT-PMP on Apple routers)
+  and works out your home's internet address. That becomes an **invite code**
+  like `K7QM-3XPA`, copied to your clipboard. Send it to your friends.
+* When you stop hosting or close the game, the port is closed again. If the game
+  ever crashes, the router closes it by itself within two hours, and the next
+  start cleans up.
+* **Windows Firewall** asks the first time you host: tick **both Private and
+  Public**, then Allow. Windows 11 often counts home networks as Public.
+* Optional password: Options, then Online settings. Only a hash of it ever
+  crosses the network.
 
-How it works: every PC runs the full game in **deterministic lockstep**. Only
+**Joining:** main menu, then *Online: join a game*.
+* **Rejoin <name>** takes you back to the last game you joined, with nothing to
+  type (the password isn't asked again).
+* **Enter invite code or address**: type the code. A plain address works too
+  (`1.2.3.4`, `1.2.3.4:47820`, or a Radmin VPN or Tailscale address). Ctrl+V pastes.
+  Look-alike characters are forgiven (O/0, I/L/1), and a mistyped code is caught.
+* Games on the **same home network** are listed automatically.
+
+**If the host screen says friends can't reach you:**
+1. *Your router's automatic port opening (UPnP) is off*: turn on UPnP in the
+   router's settings page (often under Advanced, NAT or Gaming), then host again.
+2. *Your internet provider shares one address between many homes (CGNAT)*,
+   common on mobile and some fiber connections: nobody can reach your PC
+   directly. Let a friend with a normal connection host, or use step 3.
+3. Last resort: **Radmin VPN** (free) or **Tailscale**. The host and every friend
+   install it and join the same network; the host screen then shows the address
+   (and a code) that works inside it.
+4. VPN apps such as Surfshark or NordVPN can get in the way: turn them off.
+
+**Dropped connections:** if someone's connection drops mid-game, everyone pauses
+("Waiting for X (reconnecting, 15 s)") while their game reconnects by itself.
+They pick up exactly where they left off. After 20 seconds the game goes on
+without them. Leaving through the menu tells everyone at once.
+
+**How it works:** every PC runs the full game in **deterministic lockstep**. Only
 controller inputs cross the network, a few frames ahead (*Input delay*, default 3
-frames, about 50 ms). That hides latency up to roughly that much each way; raise it
-for distant players. All players must run the same port version and the same game
-files; the lobby refuses mismatches. The game's random numbers are seeded per
-session, and peers compare a checksum every 2 seconds. If a desync is ever detected,
-a warning appears and you should restart the session.
+frames, about 50 ms), which hides latency up to roughly that much each way; raise
+it for distant players. All players must run the same port version and the same
+game files; the host refuses mismatches with a clear reason. The game's random
+numbers are seeded per session, and peers compare a checksum every 2 seconds. If
+a desync is ever detected, a warning appears and you should restart the session.
+TCP port 47820 (up to 47827) carries the game; UDP 47821 finds games on the home
+network.
 
 ## Updates
 

@@ -242,7 +242,12 @@ namespace PMK.Launcher
             TryLoadFont();
             TryLoadMenuBackground();
 
-            if (options.Join != null)
+            if (options.Join == "lan")
+            {
+                ShowMainMenu();
+                ShowJoinPage();
+            }
+            else if (options.Join != null)
                 StartJoin(options.Join);
             else if (options.Host != null)
                 StartHost();
@@ -294,12 +299,7 @@ namespace PMK.Launcher
             };
             page.Add(MenuItem.Button("Play", StartLocalGame));
             page.Add(MenuItem.Button("Online: host a game", StartHost));
-            page.Add(MenuItem.Button("Online: join a game", () => AskText("Host address (ip or ip:port)", settings.LastJoinAddress, s =>
-            {
-                settings.LastJoinAddress = s;
-                settings.Save(settingsPath);
-                StartJoin(s);
-            })));
+            page.Add(MenuItem.Button("Online: join a game", ShowJoinPage));
             page.Add(MenuItem.Button("Options", () => pages.Push(BuildOptions())));
             page.Add(MenuItem.Button(() => updater.MenuLabel, () => updater.MenuAction(settings, settingsPath, this)));
             page.Add(MenuItem.Button("Quit", Exit));
@@ -363,6 +363,9 @@ namespace PMK.Launcher
             p.Add(MenuItem.Value(() => $"Port: {settings.Port}", d => settings.Port = Math.Clamp(settings.Port + d, 1024, 65535)));
             p.Add(MenuItem.Value(() => $"Input delay (frames): {settings.InputDelayFrames}", d => settings.InputDelayFrames = Math.Clamp(settings.InputDelayFrames + d, 1, 10)));
             p.Add(MenuItem.Value(() => "Automatic port forwarding (UPnP): " + OnOff(settings.UseUpnp), d => settings.UseUpnp = !settings.UseUpnp));
+            p.Add(MenuItem.Button(() => "Password for games you host: " + (string.IsNullOrEmpty(settings.RoomPassword) ? "none" : new string('*', settings.RoomPassword.Length)),
+                () => AskText("New password for games you host", "", s => { settings.RoomPassword = s; settings.Save(settingsPath); })));
+            p.Add(MenuItem.Button("Remove the password", () => { settings.RoomPassword = ""; settings.Save(settingsPath); }));
             p.Add(MenuItem.Button("Back", () => p.OnBack()));
             return p;
         }
@@ -419,17 +422,100 @@ namespace PMK.Launcher
         private void StartHost()
         {
             net?.Dispose();
-            net = NetSession.Host(settings, install.Manifest.GameExeSha256);
+            if (options.Password != null) settings.RoomPassword = options.Password;
+            net = NetSession.Host(settings, install.Manifest.GameExeSha256, dataDir);
             net.SampleLocal = SampleLocalForNet;
             ShowLobby();
         }
 
-        private void StartJoin(string address)
+        /// <summary>Joins by invite code or address. Without a key, the remembered one for that game is used.</summary>
+        private void StartJoin(string target, byte[] key = null)
         {
             net?.Dispose();
-            net = NetSession.Join(settings, address, install.Manifest.GameExeSha256);
+            lanSearch?.Dispose();
+            lanSearch = null;
+            if (key == null && options.Password != null) key = Net.InviteCode.RoomKey(options.Password);
+            if (key == null && target == settings.LastJoinAddress && settings.LastJoinKey.Length == 64)
+                key = Convert.FromHexString(settings.LastJoinKey);
+            joiningTarget = target;
+            joiningKey = key ?? new byte[32];
+            net = NetSession.Join(settings, target, install.Manifest.GameExeSha256, dataDir, joiningKey);
             net.SampleLocal = SampleLocalForNet;
+            net.DropAtFrame = options.DropAtFrame;
             ShowLobby();
+        }
+
+        private string joiningTarget;
+        private byte[] joiningKey;
+        private Net.LanDiscovery.Search lanSearch;
+        private MenuPage joinPage;
+        private int joinPageVersion = -1;
+        private long lastLanProbe;
+
+        /// <summary>
+        /// JOIN A GAME (after Moemon's): REJOIN the last game, type an invite
+        /// code or address, or pick a game found on the local network.
+        /// </summary>
+        private void ShowJoinPage()
+        {
+            lanSearch ??= new Net.LanDiscovery.Search();
+            joinPageVersion = -1;
+            joinPage = new MenuPage("JOIN A GAME")
+            {
+                Footer = () => "Friends over the internet: type their invite code (like K7QM-3XPA).\nOn Radmin VPN / Tailscale: type their VPN address.",
+                OnBack = () => { lanSearch?.Dispose(); lanSearch = null; joinPage = null; pages.Pop(); },
+            };
+            RebuildJoinPage();
+            pages.Push(joinPage);
+            menuInput.Swallow();
+        }
+
+        private void RebuildJoinPage()
+        {
+            if (joinPage == null) return;
+            int selected = joinPage.Selected;
+            joinPage.Items.Clear();
+            if (!string.IsNullOrEmpty(settings.LastJoinAddress))
+            {
+                string label = string.IsNullOrEmpty(settings.LastJoinName) ? settings.LastJoinAddress : settings.LastJoinName;
+                joinPage.Add(MenuItem.Button("Rejoin " + label, () => StartJoin(settings.LastJoinAddress)));
+            }
+            joinPage.Add(MenuItem.Button("Enter invite code or address", () => AskText("Invite code or address", settings.LastJoinAddress, s => StartJoin(s.Trim()))));
+            var games = lanSearch?.Games ?? new List<Net.LanGame>();
+            foreach (var g in games)
+            {
+                var game = g;
+                string tag = !game.Compatible ? $" (v{game.Version}: update needed)" : game.Started ? " (playing)" : $" ({game.Players}/4)";
+                joinPage.Add(new MenuItem
+                {
+                    Label = () => "LAN: " + game.Name + (game.Locked ? " [password]" : "") + tag,
+                    Activate = () => StartJoin(game.Host.Contains(':') ? $"[{game.Host}]:{game.Port}" : $"{game.Host}:{game.Port}"),
+                    Enabled = () => game.Compatible && !game.Started,
+                });
+            }
+            if (games.Count == 0)
+                joinPage.Add(new MenuItem { Label = () => "(no games found on this network)", Enabled = () => false });
+            joinPage.Add(MenuItem.Button("Back", () => joinPage.OnBack()));
+            joinPage.Selected = Math.Clamp(selected, 0, joinPage.Items.Count - 1);
+            joinPageVersion = lanSearch?.Version ?? 0;
+        }
+
+        private void UpdateJoinPage()
+        {
+            if (joinPage == null || lanSearch == null || pages.Count == 0 || pages.Peek() != joinPage) return;
+            long now = Environment.TickCount64;
+            if (now - lastLanProbe > 3000)
+            {
+                lastLanProbe = now;
+                lanSearch.Probe();
+            }
+            if (lanSearch.Version != joinPageVersion) RebuildJoinPage();
+            // Test hook: --join lan joins the first compatible game found.
+            if (options.Join == "lan")
+            {
+                var g = lanSearch.Games.FirstOrDefault(x => x.Compatible && !x.Started);
+                if (g != null) StartJoin($"{g.Host}:{g.Port}");
+            }
         }
 
         private Microsoft.Xna.Framework.Input.GamePadState SampleLocalForNet(int localIndex, int frame)
@@ -467,6 +553,14 @@ namespace PMK.Launcher
 
         private void OnNetStarted(NetStartInfo info)
         {
+            if (!net.IsHost && joiningTarget != null)
+            {
+                // Remember the game for REJOIN (the key, never the password).
+                settings.LastJoinAddress = joiningTarget;
+                settings.LastJoinName = net.HostName ?? "";
+                settings.LastJoinKey = Convert.ToHexString(joiningKey ?? new byte[32]);
+                settings.Save(settingsPath);
+            }
             DetRandom.Reset(info.Seed);
             InputRouter.Provider = net.Input;
             Log.Write($"Online game starting: seed {info.Seed}, delay {info.InputDelay}, slots {string.Join(",", info.SlotOwners)}");
@@ -511,6 +605,14 @@ namespace PMK.Launcher
                 net.StartGame();
             if (net != null && net.StartInfo != null && guest == null)
                 OnNetStarted(net.StartInfo);
+            if (net != null && net.NeedsPassword && guest == null)
+            {
+                string target = joiningTarget;
+                net.Dispose();
+                net = null;
+                ShowMainMenu();
+                AskText("This game has a password", "", pw => StartJoin(target, Net.InviteCode.RoomKey(pw)));
+            }
             if (net != null && net.FatalError != null)
             {
                 string err = net.FatalError;
@@ -583,6 +685,7 @@ namespace PMK.Launcher
             var mk = menuInput.Poll();
             if (pages.Count > 0)
                 pages.Peek().Handle(mk);
+            UpdateJoinPage();
         }
 
         private void FinishPrompt(bool accept)
@@ -704,7 +807,7 @@ namespace PMK.Launcher
             }
             if (net != null && screen == Screen.Playing && !overlayOpen)
             {
-                string s = net.Input.Waiting ? "Waiting for other players..." : null;
+                string s = net.WaitingText();
                 if (s != null) ui.Text(s, new Vector2(ui.Width / 2f, ui.Height - ui.LineHeight * 2), Color.Yellow, center: true);
                 if (net.DesyncWarning != null) ui.Text(net.DesyncWarning, new Vector2(ui.Width / 2f, ui.LineHeight), Color.OrangeRed, center: true);
             }

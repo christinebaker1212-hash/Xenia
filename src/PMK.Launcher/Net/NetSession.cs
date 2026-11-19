@@ -14,20 +14,29 @@ using Microsoft.Xna.Framework.Input;
 namespace PMK.Launcher.Net
 {
     /// <summary>
-    /// Online session over TCP. The host relays every message, so clients
-    /// only need to reach the host (port forwarding via UPnP when available,
-    /// or a VPN such as Tailscale/ZeroTier).
+    /// Online session over TCP. The host relays every message, so clients only
+    /// need to reach the host. Connection handling follows Moemon Emerald Kai
+    /// Co-op (src/mp): invite codes, router port mapping with CGNAT detection,
+    /// VPN fallback, LAN discovery, hashed room passwords, keepalive and idle
+    /// timeouts, and automatic reconnection to a game in progress.
     /// </summary>
     public sealed class NetSession : IDisposable
     {
+        /// <summary>How long a dropped player may take to reconnect before the game goes on without them.</summary>
+        public const int ReconnectGraceMs = 20000;
+        private const int IdleTimeoutMs = 15000;
+        private const int KeepAliveMs = 1000;
+
         private sealed class Peer
         {
             public int Id;
             public string Name;
             public int LocalPlayers;
-            public Connection Conn;      // null for the local machine
+            public bool IsLocal;
+            public Connection Conn;           // null for the local machine, or while disconnected
             public int LastInputFrame = -1;
             public long PingMs = -1;
+            public long DisconnectedAt;       // TickCount64 when the connection dropped (0 = connected)
         }
 
         private sealed class Connection
@@ -36,44 +45,75 @@ namespace PMK.Launcher.Net
             public NetworkStream Stream;
             public readonly object WriteLock = new object();
             public volatile bool Closed;
-            public int PeerId = -1;
+            public long LastReceive = Environment.TickCount64;
             public string Remote;
         }
 
         private readonly Settings settings;
         private readonly string gameHash;
+        private readonly string dataDir;
         private readonly ConcurrentQueue<(Connection conn, byte[] msg)> inbox = new ConcurrentQueue<(Connection, byte[])>();
         private readonly List<Peer> peers = new List<Peer>();
+        private readonly List<Connection> pending = new List<Connection>();   // connected, not yet welcomed
         private readonly Dictionary<int, ulong> localHashes = new Dictionary<int, ulong>();
+        private readonly Dictionary<int, List<(int peer, ulong hash)>> pendingHashes = new Dictionary<int, List<(int, ulong)>>();
+        private readonly List<(int frame, byte[] framed)> inputHistory = new List<(int, byte[])>(); // host: for resuming peers
+        private readonly List<(int peer, int from)> leftEvents = new List<(int, int)>();
         private readonly CancellationTokenSource cts = new CancellationTokenSource();
+        private readonly byte[] roomKey;
+        private readonly ulong sessionId;
         private TcpListener listener;
         private Connection hostConn;
         private int localId;
         private int nextPeerId = 1;
         private string status;
-        private Upnp upnp;
-        private long lastPingTicks;
+        private PortMapper portMapper;
+        private IDisposable lanResponder;
+        private readonly LanDiscovery.Advert advert = new LanDiscovery.Advert();
+        private Timer keepAlive;
+        private long hostPing = -1;
+        private bool codeCopied;
+
+        // Client: where to (re)connect.
+        private string joinHost;
+        private int joinPort;
+        private long reconnectDeadline;
+        private bool reconnectInFlight;
+        private long nextReconnectAttempt;
 
         public bool IsHost { get; }
         public NetStartInfo StartInfo { get; private set; }
         public NetInput Input { get; private set; }
         public string FatalError { get; private set; }
         public string DesyncWarning { get; private set; }
+        /// <summary>The host wants a (different) password: ask the player and join again.</summary>
+        public bool NeedsPassword { get; private set; }
+        /// <summary>The host's name, once known (remembered for REJOIN).</summary>
+        public string HostName => peers.FirstOrDefault(p => p.Id == 0)?.Name;
+        public bool Reconnecting => !IsHost && reconnectDeadline > 0;
+        /// <summary>Test hook: drop the connection (as a network failure would) at this frame.</summary>
+        public int DropAtFrame { get; set; } = -1;
 
-        private NetSession(Settings settings, string gameHash, bool host)
+        private NetSession(Settings settings, string gameHash, string dataDir, bool host, byte[] key)
         {
             this.settings = settings;
             this.gameHash = gameHash ?? "";
+            this.dataDir = dataDir;
             IsHost = host;
+            roomKey = key ?? new byte[32];
+            var rnd = new byte[8];
+            System.Security.Cryptography.RandomNumberGenerator.Fill(rnd);
+            sessionId = BitConverter.ToUInt64(rnd, 0);
+            keepAlive = new Timer(_ => SendKeepAlive(), null, KeepAliveMs, KeepAliveMs);
         }
 
         // ------------------------------------------------------------------ setup
 
-        public static NetSession Host(Settings settings, string gameHash)
+        public static NetSession Host(Settings settings, string gameHash, string dataDir)
         {
-            var s = new NetSession(settings, gameHash, true);
+            var s = new NetSession(settings, gameHash, dataDir, true, InviteCode.RoomKey(settings.RoomPassword));
             s.localId = 0;
-            s.peers.Add(new Peer { Id = 0, Name = settings.PlayerName, LocalPlayers = settings.LocalPlayers });
+            s.peers.Add(new Peer { Id = 0, Name = settings.PlayerName, LocalPlayers = settings.LocalPlayers, IsLocal = true });
             try
             {
                 if (Socket.OSSupportsIPv6)
@@ -94,38 +134,53 @@ namespace PMK.Launcher.Net
                     s.listener = new TcpListener(IPAddress.Any, settings.Port);
                     s.listener.Start();
                 }
-                s.status = $"Waiting for players on port {settings.Port}";
+                s.status = "Waiting for players";
                 Task.Run(() => s.AcceptLoop(s.cts.Token));
                 if (settings.UseUpnp)
-                    s.upnp = Upnp.Start(settings.Port);
-                Log.Write($"Hosting on port {settings.Port}");
+                    s.portMapper = PortMapper.Start(dataDir, settings.Port);
+                s.advert.Name = settings.PlayerName;
+                s.advert.TcpPort = settings.Port;
+                s.advert.Locked = !string.IsNullOrEmpty(settings.RoomPassword);
+                s.advert.Players = settings.LocalPlayers;
+                s.lanResponder = LanDiscovery.StartResponder(s.advert);
+                Log.Write($"Hosting on port {settings.Port}" + (s.advert.Locked ? " (password)" : ""));
             }
             catch (SocketException ex)
             {
-                s.FatalError = $"Could not open port {settings.Port}: {ex.Message}";
+                s.FatalError = $"Could not open port {settings.Port}: {ex.Message}. Is another copy of the game hosting?";
             }
             return s;
         }
 
-        public static NetSession Join(Settings settings, string address, string gameHash)
+        /// <summary>Joins by invite code or address. <paramref name="key"/> is the room key (InviteCode.RoomKey).</summary>
+        public static NetSession Join(Settings settings, string target, string gameHash, string dataDir, byte[] key)
         {
-            var s = new NetSession(settings, gameHash, false);
-            s.status = "Connecting to " + address + "...";
-            Task.Run(() => s.ConnectAsync(address));
+            var s = new NetSession(settings, gameHash, dataDir, false, key);
+            try
+            {
+                (s.joinHost, s.joinPort) = InviteCode.ResolveJoinTarget(target, settings.Port);
+            }
+            catch (FormatException)
+            {
+                s.FatalError = "That doesn't look like an invite code (like K7QM-3XPA) or an address (like 26.12.34.56).";
+                return s;
+            }
+            s.status = "Connecting...";
+            Task.Run(() => s.ConnectAsync(false));
             return s;
         }
 
-        private async Task ConnectAsync(string address)
+        private async Task ConnectAsync(bool resume)
         {
             try
             {
-                var (host, port) = ParseAddress(address, settings.Port);
                 // TcpClient() picks IPv4 or IPv6 from what the name resolves to.
                 var client = new TcpClient();
-                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
-                    await client.ConnectAsync(host, port, timeout.Token);
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(resume ? 4 : 8)))
+                    await client.ConnectAsync(joinHost, joinPort, timeout.Token);
                 client.NoDelay = true;
-                var conn = new Connection { Client = client, Stream = client.GetStream(), Remote = address };
+                client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                var conn = new Connection { Client = client, Stream = client.GetStream(), Remote = $"{joinHost}:{joinPort}" };
                 hostConn = conn;
                 StartReader(conn);
                 Send(conn, NetProtocol.Build(MsgType.Hello, w =>
@@ -135,23 +190,37 @@ namespace PMK.Launcher.Net
                     w.Write(gameHash);
                     w.Write(settings.PlayerName);
                     w.Write((byte)settings.LocalPlayers);
+                    w.Write(roomKey);
+                    w.Write(resume ? StartInfo.SessionId : 0UL);
+                    w.Write((byte)(resume ? localId : 255));
+                    w.Write(resume && Input != null ? Input.Frame : 0);
                 }));
-                status = "Connected, waiting for the host to start";
+                if (!resume) status = "Connected, waiting for the host to start";
             }
-            catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException || ex is IOException || ex is FormatException)
+            catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException || ex is IOException)
             {
-                FatalError = $"Could not connect to {address}: {ex.Message}";
+                if (resume)
+                    Log.Write("Reconnect attempt failed: " + ex.Message);
+                else
+                    FatalError = $"Couldn't reach {joinHost}:{joinPort}. Ask your friend to check they're hosting, that the code is current, "
+                        + "and that Windows Firewall allows the game on Private AND Public networks.";
+            }
+            finally
+            {
+                reconnectInFlight = false;
             }
         }
 
         public static (string host, int port) ParseAddress(string address, int defaultPort)
         {
-            address = address.Trim();
+            address = (address ?? "").Trim();
+            if (address.Length == 0) throw new FormatException("empty address");
             if (address.StartsWith("["))
             {
                 int end = address.IndexOf(']');
+                if (end < 0) throw new FormatException("bad address");
                 string h = address.Substring(1, end - 1);
-                int p = end + 2 <= address.Length && address.Length > end + 1 && address[end + 1] == ':' ? int.Parse(address.Substring(end + 2)) : defaultPort;
+                int p = address.Length > end + 1 && address[end + 1] == ':' ? int.Parse(address.Substring(end + 2)) : defaultPort;
                 return (h, p);
             }
             int colon = address.LastIndexOf(':');
@@ -168,7 +237,9 @@ namespace PMK.Launcher.Net
                 {
                     var client = await listener.AcceptTcpClientAsync(token);
                     client.NoDelay = true;
+                    client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                     var conn = new Connection { Client = client, Stream = client.GetStream(), Remote = client.Client.RemoteEndPoint?.ToString() };
+                    lock (pending) pending.Add(conn);
                     StartReader(conn);
                 }
                 catch (OperationCanceledException) { return; }
@@ -190,6 +261,7 @@ namespace PMK.Launcher.Net
                         int len = header[0] | (header[1] << 8);
                         var msg = new byte[len];
                         ReadExact(conn.Stream, msg, len);
+                        Interlocked.Exchange(ref conn.LastReceive, Environment.TickCount64);
                         inbox.Enqueue((conn, msg));
                     }
                 }
@@ -212,7 +284,7 @@ namespace PMK.Launcher.Net
             }
         }
 
-        private void Send(Connection c, byte[] msg)
+        private static void Send(Connection c, byte[] msg)
         {
             if (c == null || c.Closed) return;
             try
@@ -222,13 +294,36 @@ namespace PMK.Launcher.Net
             catch (Exception)
             {
                 c.Closed = true;
+                try { c.Client.Close(); } catch (Exception) { }
             }
+        }
+
+        private static void Close(Connection c)
+        {
+            if (c == null) return;
+            c.Closed = true;
+            try { c.Client.Close(); } catch (Exception) { }
         }
 
         private void Broadcast(byte[] msg, Connection except = null)
         {
-            foreach (var p in peers)
+            foreach (var p in peers.ToArray())
                 if (p.Conn != null && p.Conn != except) Send(p.Conn, msg);
+        }
+
+        /// <summary>
+        /// Background keepalive: keeps connections alive (and idle timeouts
+        /// honest) even while the game loop is busy, e.g. while the window is
+        /// being dragged on Windows.
+        /// </summary>
+        private void SendKeepAlive()
+        {
+            try
+            {
+                var ping = NetProtocol.Build(MsgType.Ping, w => w.Write(Environment.TickCount64));
+                if (IsHost) Broadcast(ping); else Send(hostConn, ping);
+            }
+            catch (Exception) { }
         }
 
         // ------------------------------------------------------------------ main-thread pump
@@ -247,29 +342,72 @@ namespace PMK.Launcher.Net
                     Log.Write("Bad message: " + ex.Message);
                 }
             }
-            // Ping once a second for the lobby/status display.
+
             long now = Environment.TickCount64;
-            if (now - lastPingTicks > 1000)
+
+            // Idle timeout: a connection that has gone silent is dead even if TCP hasn't noticed.
+            foreach (var c in AllConnections())
+                if (!c.Closed && now - Interlocked.Read(ref c.LastReceive) > IdleTimeoutMs)
+                {
+                    Log.Write($"No data from {c.Remote} for {IdleTimeoutMs / 1000} s: closing");
+                    Close(c);
+                }
+
+            if (IsHost)
             {
-                lastPingTicks = now;
-                var ping = NetProtocol.Build(MsgType.Ping, w => w.Write(now));
-                if (IsHost) Broadcast(ping); else Send(hostConn, ping);
+                // Players who didn't come back in time: the game goes on without them.
+                foreach (var p in peers.Where(p => p.DisconnectedAt > 0 && now - p.DisconnectedAt > ReconnectGraceMs).ToList())
+                    DropPeer(p, "did not reconnect in time");
+                advert.Players = PlayerCount;
+                advert.Started = StartInfo != null;
+                if (!codeCopied && portMapper?.InviteCode != null)
+                {
+                    codeCopied = true;
+                    Clipboard(portMapper.InviteCode);
+                }
             }
+            else if (reconnectDeadline > 0)
+            {
+                if (now > reconnectDeadline)
+                {
+                    reconnectDeadline = 0;
+                    FatalError = "Lost the connection to the host and couldn't reconnect.";
+                }
+                else if (!reconnectInFlight && now >= nextReconnectAttempt)
+                {
+                    reconnectInFlight = true;
+                    nextReconnectAttempt = now + 2000;
+                    Task.Run(() => ConnectAsync(true));
+                }
+            }
+
+            if (DropAtFrame >= 0 && Input != null && Input.Frame >= DropAtFrame && !IsHost)
+            {
+                DropAtFrame = -1;
+                Log.Write("Test: dropping the connection");
+                Close(hostConn);
+            }
+        }
+
+        private IEnumerable<Connection> AllConnections()
+        {
+            var list = new List<Connection>();
+            if (hostConn != null) list.Add(hostConn);
+            foreach (var p in peers) if (p.Conn != null) list.Add(p.Conn);
+            lock (pending) list.AddRange(pending);
+            return list;
         }
 
         private void Handle(Connection conn, byte[] msg)
         {
             var r = new BinaryReader(new MemoryStream(msg), Encoding.UTF8);
             var type = (MsgType)r.ReadByte();
+            if (!IsHost && conn != hostConn) return; // a stale connection's leftovers
             switch (type)
             {
                 case MsgType.Hello when IsHost: OnHello(conn, r); break;
-                case MsgType.Welcome when !IsHost:
-                    localId = r.ReadByte();
-                    break;
-                case MsgType.Reject when !IsHost:
-                    FatalError = "The host refused the connection: " + r.ReadString();
-                    break;
+                case MsgType.Welcome when !IsHost: OnWelcome(r); break;
+                case MsgType.Reject when !IsHost: OnReject(r); break;
                 case MsgType.Lobby when !IsHost: OnLobby(r); break;
                 case MsgType.Start when !IsHost: OnStart(r); break;
                 case MsgType.Input: OnInput(conn, msg, r); break;
@@ -285,51 +423,111 @@ namespace PMK.Launcher.Net
                         peers.RemoveAll(p => p.Id == id);
                         break;
                     }
+                case MsgType.PeerStatus when !IsHost:
+                    {
+                        int id = r.ReadByte();
+                        bool connected = r.ReadByte() != 0;
+                        var p = peers.FirstOrDefault(x => x.Id == id);
+                        if (p != null) p.DisconnectedAt = connected ? 0 : Environment.TickCount64;
+                        break;
+                    }
+                case MsgType.Bye:
+                    if (IsHost)
+                    {
+                        var p = peers.FirstOrDefault(x => x.Conn == conn);
+                        if (p != null) DropPeer(p, "left");
+                    }
+                    else
+                    {
+                        FatalError = "The host ended the session.";
+                        reconnectDeadline = 0;
+                    }
+                    break;
                 case MsgType.Ping:
                     Send(conn, NetProtocol.Build(MsgType.Pong, w => w.Write(r.ReadInt64())));
                     break;
                 case MsgType.Pong:
                     {
-                        long sent = r.ReadInt64();
-                        long ms = Environment.TickCount64 - sent;
-                        var p = IsHost ? peers.FirstOrDefault(x => x.Conn == conn) : peers.FirstOrDefault(x => x.Id == 0);
-                        if (p != null) p.PingMs = ms;
-                        else if (!IsHost) hostPing = ms;
+                        long ms = Environment.TickCount64 - r.ReadInt64();
+                        if (IsHost)
+                        {
+                            var p = peers.FirstOrDefault(x => x.Conn == conn);
+                            if (p != null) p.PingMs = ms;
+                        }
+                        else hostPing = ms;
                         break;
                     }
             }
         }
 
-        private long hostPing = -1;
+        // ------------------------------------------------------------------ host: joining and resuming
 
         private void OnHello(Connection conn, BinaryReader r)
         {
+            lock (pending) pending.Remove(conn);
             ushort proto = r.ReadUInt16();
             string version = r.ReadString();
             string hash = r.ReadString();
             string name = r.ReadString();
             int players = Math.Clamp((int)r.ReadByte(), 1, 4);
+            byte[] key = r.ReadBytes(32);
+            ulong resumeSession = r.ReadUInt64();
+            int resumePeer = r.ReadByte();
+            int resumeFrame = r.ReadInt32();
+
+            RejectCode code = RejectCode.Other;
             string reason = null;
             if (proto != NetProtocol.Version || version != AppInfo.Version)
                 reason = $"version mismatch (host v{AppInfo.Version}, you v{version}) - update both copies";
             else if (!string.Equals(hash, gameHash, StringComparison.OrdinalIgnoreCase))
                 reason = "your game files differ from the host's";
-            else if (StartInfo != null)
+            else if (!key.AsSpan().SequenceEqual(roomKey))
+            {
+                code = RejectCode.Password;
+                reason = key.All(b => b == 0) ? "this game has a password" : "wrong password";
+            }
+
+            if (reason == null && resumeSession != 0)
+            {
+                // A player reconnecting to the game in progress.
+                var peer = peers.FirstOrDefault(p => p.Id == resumePeer && !p.IsLocal);
+                if (StartInfo == null || resumeSession != sessionId || peer == null)
+                {
+                    code = RejectCode.Dropped;
+                    reason = "the game went on without you (reconnected too late)";
+                }
+                else
+                {
+                    Close(peer.Conn);
+                    peer.Conn = conn;
+                    peer.DisconnectedAt = 0;
+                    Send(conn, NetProtocol.Build(MsgType.Welcome, w => { w.Write((byte)peer.Id); w.Write(sessionId); w.Write(peer.LastInputFrame); }));
+                    SendLobbyTo(conn);
+                    foreach (var (pid, from) in leftEvents)
+                        Send(conn, NetProtocol.Build(MsgType.PeerLeft, w => { w.Write((byte)pid); w.Write(from); }));
+                    foreach (var (frame, framed) in inputHistory)
+                        if (frame >= resumeFrame) Send(conn, framed);
+                    Broadcast(NetProtocol.Build(MsgType.PeerStatus, w => { w.Write((byte)peer.Id); w.Write((byte)1); }), conn);
+                    Log.Write($"{peer.Name} reconnected from {conn.Remote} (frame {resumeFrame})");
+                    return;
+                }
+            }
+            else if (reason == null && StartInfo != null)
                 reason = "the game has already started";
-            else if (peers.Sum(p => p.LocalPlayers) + players > 4)
+            else if (reason == null && PlayerCount + players > 4)
                 reason = "the game is full (4 players maximum)";
+
             if (reason != null)
             {
-                Send(conn, NetProtocol.Build(MsgType.Reject, w => w.Write(reason)));
+                Send(conn, NetProtocol.Build(MsgType.Reject, w => { w.Write((byte)code); w.Write(reason); }));
                 Log.Write($"Rejected {conn.Remote}: {reason}");
-                Task.Delay(500).ContinueWith(_ => { try { conn.Client.Close(); } catch (Exception) { } });
+                Task.Delay(500).ContinueWith(_ => Close(conn));
                 return;
             }
-            var peer = new Peer { Id = nextPeerId++, Name = Clean(name), LocalPlayers = players, Conn = conn };
-            conn.PeerId = peer.Id;
-            peers.Add(peer);
-            Send(conn, NetProtocol.Build(MsgType.Welcome, w => w.Write((byte)peer.Id)));
-            Log.Write($"{peer.Name} joined from {conn.Remote}");
+            var np = new Peer { Id = nextPeerId++, Name = Clean(name), LocalPlayers = players, Conn = conn };
+            peers.Add(np);
+            Send(conn, NetProtocol.Build(MsgType.Welcome, w => { w.Write((byte)np.Id); w.Write(sessionId); w.Write(-1); }));
+            Log.Write($"{np.Name} joined from {conn.Remote}");
             BroadcastLobby();
         }
 
@@ -340,19 +538,100 @@ namespace PMK.Launcher.Net
             return s.Length > 16 ? s.Substring(0, 16) : s;
         }
 
-        private void BroadcastLobby()
+        private byte[] LobbyMessage() => NetProtocol.Build(MsgType.Lobby, w =>
         {
-            var msg = NetProtocol.Build(MsgType.Lobby, w =>
+            w.Write((byte)peers.Count);
+            foreach (var p in peers)
             {
-                w.Write((byte)peers.Count);
-                foreach (var p in peers)
+                w.Write((byte)p.Id);
+                w.Write(p.Name);
+                w.Write((byte)p.LocalPlayers);
+                w.Write((byte)(p.DisconnectedAt > 0 ? 0 : 1));
+            }
+        });
+
+        private void BroadcastLobby() => Broadcast(LobbyMessage());
+        private void SendLobbyTo(Connection c) => Send(c, LobbyMessage());
+
+        private void OnDisconnected(Connection conn)
+        {
+            lock (pending) pending.Remove(conn);
+            if (!IsHost)
+            {
+                if (conn != hostConn || FatalError != null) return;
+                if (StartInfo != null)
                 {
-                    w.Write((byte)p.Id);
-                    w.Write(p.Name);
-                    w.Write((byte)p.LocalPlayers);
+                    // In a game: keep trying to get back in for a while (Moemon's RECONNECTING...).
+                    if (reconnectDeadline == 0)
+                    {
+                        Log.Write("Connection to the host lost, reconnecting");
+                        reconnectDeadline = Environment.TickCount64 + ReconnectGraceMs;
+                        nextReconnectAttempt = Environment.TickCount64 + 500;
+                    }
                 }
-            });
-            Broadcast(msg);
+                else
+                {
+                    FatalError = "The host closed the session.";
+                }
+                return;
+            }
+            var peer = peers.FirstOrDefault(p => p.Conn == conn);
+            if (peer == null) return;
+            if (StartInfo != null)
+            {
+                // Hold their place: everyone waits while they reconnect.
+                peer.Conn = null;
+                peer.DisconnectedAt = Environment.TickCount64;
+                Log.Write($"{peer.Name} dropped; waiting up to {ReconnectGraceMs / 1000} s for them to reconnect");
+                Broadcast(NetProtocol.Build(MsgType.PeerStatus, w => { w.Write((byte)peer.Id); w.Write((byte)0); }));
+            }
+            else
+            {
+                DropPeer(peer, "left");
+            }
+        }
+
+        private void DropPeer(Peer peer, string why)
+        {
+            if (!peers.Remove(peer)) return;
+            Close(peer.Conn);
+            Log.Write($"{peer.Name} {why}");
+            if (StartInfo != null)
+            {
+                int from = peer.LastInputFrame + 1;
+                leftEvents.Add((peer.Id, from));
+                Input?.PeerLeft(peer.Id, from);
+                Broadcast(NetProtocol.Build(MsgType.PeerLeft, w => { w.Write((byte)peer.Id); w.Write(from); }));
+            }
+            else
+            {
+                BroadcastLobby();
+            }
+        }
+
+        // ------------------------------------------------------------------ client side
+
+        private void OnWelcome(BinaryReader r)
+        {
+            localId = r.ReadByte();
+            r.ReadUInt64(); // session id (also in Start)
+            int lastFromMe = r.ReadInt32();
+            if (reconnectDeadline > 0)
+            {
+                reconnectDeadline = 0;
+                Log.Write($"Reconnected to the host; resending inputs after frame {lastFromMe}");
+                Input?.ResendAfter(lastFromMe);
+            }
+        }
+
+        private void OnReject(BinaryReader r)
+        {
+            var code = (RejectCode)r.ReadByte();
+            string reason = r.ReadString();
+            reconnectDeadline = 0;
+            if (code == RejectCode.Password)
+                NeedsPassword = true;
+            FatalError = "The host refused the connection: " + reason;
         }
 
         private void OnLobby(BinaryReader r)
@@ -360,7 +639,12 @@ namespace PMK.Launcher.Net
             peers.Clear();
             int n = r.ReadByte();
             for (int i = 0; i < n; i++)
-                peers.Add(new Peer { Id = r.ReadByte(), Name = r.ReadString(), LocalPlayers = r.ReadByte() });
+            {
+                var p = new Peer { Id = r.ReadByte(), Name = r.ReadString(), LocalPlayers = r.ReadByte() };
+                p.DisconnectedAt = r.ReadByte() == 0 ? Environment.TickCount64 : 0;
+                p.IsLocal = p.Id == localId;
+                peers.Add(p);
+            }
         }
 
         public int PlayerCount => peers.Sum(p => p.LocalPlayers);
@@ -372,6 +656,7 @@ namespace PMK.Launcher.Net
             if (!CanStart) return;
             var info = new NetStartInfo
             {
+                SessionId = sessionId,
                 Seed = new Random().Next(1, int.MaxValue),
                 InputDelay = settings.InputDelayFrames,
             };
@@ -381,6 +666,7 @@ namespace PMK.Launcher.Net
                     info.SlotOwners[slot++] = (byte)p.Id;
             Broadcast(NetProtocol.Build(MsgType.Start, w =>
             {
+                w.Write(info.SessionId);
                 w.Write(info.Seed);
                 w.Write((byte)info.InputDelay);
                 w.Write(info.SlotOwners);
@@ -392,6 +678,7 @@ namespace PMK.Launcher.Net
         {
             var info = new NetStartInfo
             {
+                SessionId = r.ReadUInt64(),
                 Seed = r.ReadInt32(),
                 InputDelay = r.ReadByte(),
                 SlotOwners = r.ReadBytes(4),
@@ -404,7 +691,7 @@ namespace PMK.Launcher.Net
 
         private void Begin(NetStartInfo info)
         {
-            listener?.Stop(); // no late joiners
+            // The host keeps listening: dropped players reconnect through it (new joins are refused).
             Input = new NetInput(info, localId, (i, f) => SampleLocal?.Invoke(i, f) ?? default, SendInputs, SendHash);
             StartInfo = info;
             status = "In game";
@@ -423,7 +710,24 @@ namespace PMK.Launcher.Net
                     NetProtocol.WriteState(w, state);
                 }
             });
-            if (IsHost) Broadcast(msg); else Send(hostConn, msg);
+            if (IsHost)
+            {
+                Remember(frame, msg);
+                Broadcast(msg);
+            }
+            else
+            {
+                Send(hostConn, msg);
+            }
+        }
+
+        /// <summary>Host: keeps the last minute of inputs for players who reconnect.</summary>
+        private void Remember(int frame, byte[] framed)
+        {
+            inputHistory.Add((frame, framed));
+            int cutoff = (Input?.Frame ?? 0) - 3600;
+            if (inputHistory.Count > 0 && inputHistory[0].frame < cutoff)
+                inputHistory.RemoveAll(e => e.frame < cutoff);
         }
 
         private void OnInput(Connection conn, byte[] raw, BinaryReader r)
@@ -436,11 +740,13 @@ namespace PMK.Launcher.Net
                 // Clients may only send their own inputs; relay them to everyone else.
                 var peer = peers.FirstOrDefault(p => p.Conn == conn);
                 if (peer == null || peer.Id != peerId) return;
-                peer.LastInputFrame = Math.Max(peer.LastInputFrame, frame);
+                if (frame <= peer.LastInputFrame) return; // resent after a reconnect: already relayed
+                peer.LastInputFrame = frame;
                 var framed = new byte[raw.Length + 2];
                 framed[0] = (byte)raw.Length;
                 framed[1] = (byte)(raw.Length >> 8);
                 Buffer.BlockCopy(raw, 0, framed, 2, raw.Length);
+                Remember(frame, framed);
                 Broadcast(framed, conn);
             }
             for (int i = 0; i < n; i++)
@@ -452,21 +758,27 @@ namespace PMK.Launcher.Net
             }
         }
 
+        // ------------------------------------------------------------------ desync detection
+
         private void SendHash(int frame, ulong hash)
         {
             if (frame % 600 == 0) Log.Write($"Net frame {frame} hash {hash:X16}");
             if (IsHost)
             {
                 localHashes[frame] = hash;
-                CheckHash(frame, hash, 0);
+                if (pendingHashes.TryGetValue(frame, out var list))
+                {
+                    foreach (var (peer, h) in list) Compare(frame, hash, peer, h);
+                    pendingHashes.Remove(frame);
+                }
+                foreach (var k in localHashes.Keys.Where(k => k < frame - NetInput.HashInterval * 10).ToList())
+                    localHashes.Remove(k);
             }
             else
             {
                 Send(hostConn, NetProtocol.Build(MsgType.Hash, w => { w.Write((byte)localId); w.Write(frame); w.Write(hash); }));
             }
         }
-
-        private readonly Dictionary<int, List<(int peer, ulong hash)>> pendingHashes = new Dictionary<int, List<(int, ulong)>>();
 
         private void OnHash(BinaryReader r)
         {
@@ -482,17 +794,6 @@ namespace PMK.Launcher.Net
             }
         }
 
-        private void CheckHash(int frame, ulong mine, int self)
-        {
-            if (pendingHashes.TryGetValue(frame, out var list))
-            {
-                foreach (var (peer, hash) in list) Compare(frame, mine, peer, hash);
-                pendingHashes.Remove(frame);
-            }
-            foreach (var k in localHashes.Keys.Where(k => k < frame - NetInput.HashInterval * 10).ToList())
-                localHashes.Remove(k);
-        }
-
         private void Compare(int frame, ulong mine, int peer, ulong theirs)
         {
             if (mine == theirs || DesyncWarning != null) return;
@@ -501,61 +802,99 @@ namespace PMK.Launcher.Net
             Broadcast(NetProtocol.Build(MsgType.Desync, w => w.Write(frame)));
         }
 
-        private void OnDisconnected(Connection conn)
+        // ------------------------------------------------------------------ display
+
+        /// <summary>
+        /// How friends can reach this host, in the spirit of Moemon's hosting
+        /// message: the invite code (copied), or plainly why there isn't one.
+        /// </summary>
+        public string ReachabilityText()
         {
-            if (!IsHost)
-            {
-                if (conn == hostConn && FatalError == null)
-                    FatalError = StartInfo != null ? "The connection to the host was lost." : "The host closed the session.";
-                return;
-            }
-            var peer = peers.FirstOrDefault(p => p.Conn == conn);
-            if (peer == null) return;
-            peers.Remove(peer);
-            Log.Write($"{peer.Name} left");
-            if (StartInfo != null)
-            {
-                int from = peer.LastInputFrame + 1;
-                Input?.PeerLeft(peer.Id, from);
-                Broadcast(NetProtocol.Build(MsgType.PeerLeft, w => { w.Write((byte)peer.Id); w.Write(from); }));
-            }
+            if (!IsHost) return "";
+            var sb = new StringBuilder();
+            bool hasVpn = VpnDetect.TryFind(out string vpnName, out var vpnIp);
+            var pm = portMapper;
+            if (pm == null)
+                sb.Append("Automatic port opening is off (Options > Online).\n");
+            else if (pm.State == PortMapState.Searching)
+                sb.Append("Opening your router to the internet...\n");
+            else if (pm.State == PortMapState.Open)
+                sb.Append($"Open to the internet! Invite code: {pm.InviteCode} (copied)\nFriends choose JOIN A GAME and type it.\n");
             else
             {
-                BroadcastLobby();
+                string why = pm.Error switch
+                {
+                    PortMapError.Cgnat => "Your internet provider shares one address between many homes (CGNAT)",
+                    PortMapError.Refused => "Your router refused to open the game's port",
+                    _ => "Your router's automatic port opening (UPnP) is off",
+                };
+                sb.Append(why).Append(",\nso friends elsewhere can't reach you directly.\n");
+                if (!hasVpn)
+                    sb.Append(pm.Error == PortMapError.Cgnat
+                        ? "Let a friend with a normal connection host, or use Radmin VPN / Tailscale.\n"
+                        : "Turn on UPnP in your router, or use Radmin VPN / Tailscale.\n");
             }
+            if (hasVpn)
+            {
+                string code = InviteCode.Make(vpnIp, settings.Port);
+                sb.Append($"On {vpnName}, friends type {vpnIp}" + (code != null ? $" (or {code})" : "") + "\n");
+            }
+            var lan = LocalAddresses().FirstOrDefault();
+            if (lan != null) sb.Append($"Same home network: they'll see you in JOIN A GAME ({lan}).\n");
+            sb.Append("Windows Firewall: allow the game on Private AND Public networks.");
+            return sb.ToString();
         }
-
-        // ------------------------------------------------------------------ display
 
         public string LobbyText()
         {
-            var sb = new StringBuilder();
             if (FatalError != null) return FatalError;
+            var sb = new StringBuilder();
             sb.Append(status).Append('\n');
             int slot = 1;
             foreach (var p in peers.OrderBy(p => p.Id))
             {
-                string slots = string.Join(",", Enumerable.Range(slot, Math.Min(p.LocalPlayers, 5 - slot)).Select(s => "P" + s));
+                string slots = string.Join(",", Enumerable.Range(slot, Math.Max(0, Math.Min(p.LocalPlayers, 5 - slot))).Select(s => "P" + s));
                 slot += p.LocalPlayers;
-                string ping = p.Id == localId ? "you" : p.PingMs >= 0 ? p.PingMs + " ms" : IsHost ? "..." : hostPing >= 0 && p.Id == 0 ? hostPing + " ms" : "";
+                string ping = p.Id == localId ? "you" : p.DisconnectedAt > 0 ? "reconnecting..." : IsHost ? (p.PingMs >= 0 ? p.PingMs + " ms" : "...") : p.Id == 0 && hostPing >= 0 ? hostPing + " ms" : "";
                 sb.Append($"{p.Name}  [{slots}]  {ping}\n");
             }
             if (IsHost)
             {
-                sb.Append("Share one of these addresses:\n");
-                foreach (var a in LocalAddresses().Take(3)) sb.Append($"  LAN {a}:{settings.Port}\n");
-                if (upnp != null) sb.Append("  ").Append(upnp.Status).Append('\n');
+                if (!string.IsNullOrEmpty(settings.RoomPassword)) sb.Append("Password protected.\n");
+                sb.Append(ReachabilityText());
             }
             return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>One line shown while the game waits on the network, or null.</summary>
+        public string WaitingText()
+        {
+            if (Reconnecting)
+                return $"Reconnecting to the host... ({Math.Max(0, (reconnectDeadline - Environment.TickCount64) / 1000)} s)";
+            if (Input == null || !Input.Waiting) return null;
+            var names = new List<string>();
+            foreach (int id in Input.WaitingForPeers())
+            {
+                var p = peers.FirstOrDefault(x => x.Id == id);
+                if (p == null) continue;
+                if (p.DisconnectedAt > 0)
+                {
+                    long left = Math.Max(0, (ReconnectGraceMs - (Environment.TickCount64 - p.DisconnectedAt)) / 1000);
+                    names.Add($"{p.Name} (reconnecting, {left} s)");
+                }
+                else names.Add(p.Name);
+            }
+            return names.Count > 0 ? "Waiting for " + string.Join(", ", names) + "..." : "Waiting for other players...";
         }
 
         public string StatusLine()
         {
             if (Input == null) return status;
             string ping = IsHost
-                ? string.Join(" ", peers.Where(p => p.Conn != null).Select(p => $"{p.Name}:{p.PingMs}ms"))
+                ? string.Join(" ", peers.Where(p => !p.IsLocal).Select(p => $"{p.Name}:{(p.DisconnectedAt > 0 ? "--" : p.PingMs.ToString())}ms"))
                 : $"host ping {hostPing} ms";
-            return $"Online - frame {Input.Frame} - {ping}";
+            string code = IsHost && portMapper?.InviteCode != null ? "  code " + portMapper.InviteCode : "";
+            return $"Online - frame {Input.Frame} - {ping}{code}";
         }
 
         public static IEnumerable<string> LocalAddresses()
@@ -575,14 +914,26 @@ namespace PMK.Launcher.Net
             return list;
         }
 
+        private static void Clipboard(string text)
+        {
+            try { SDL3.SDL.SDL_SetClipboardText(text); }
+            catch (Exception ex) when (ex is DllNotFoundException || ex is EntryPointNotFoundException) { }
+        }
+
         public void Dispose()
         {
+            keepAlive?.Dispose();
+            keepAlive = null;
+            // Say goodbye so nobody waits for a reconnect that won't come.
+            var bye = NetProtocol.Build(MsgType.Bye, null);
+            if (IsHost) Broadcast(bye); else Send(hostConn, bye);
             cts.Cancel();
             try { listener?.Stop(); } catch (SocketException) { }
-            foreach (var p in peers)
-                if (p.Conn != null) { p.Conn.Closed = true; try { p.Conn.Client.Close(); } catch (Exception) { } }
-            if (hostConn != null) { hostConn.Closed = true; try { hostConn.Client.Close(); } catch (Exception) { } }
-            upnp?.Dispose();
+            foreach (var p in peers) Close(p.Conn);
+            lock (pending) foreach (var c in pending) Close(c);
+            Close(hostConn);
+            lanResponder?.Dispose();
+            portMapper?.Dispose();
         }
     }
 }

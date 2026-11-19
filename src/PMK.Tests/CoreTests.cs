@@ -312,3 +312,89 @@ public class GamePackageTests
         }
     }
 }
+
+public class InviteCodeTests
+{
+    [Theory]
+    [InlineData("203.0.113.7", 47820)]
+    [InlineData("8.8.8.8", 47827)]
+    [InlineData("26.12.34.56", 47821)]
+    [InlineData("255.255.255.254", 47823)]
+    public void RoundTrips(string ip, int port)
+    {
+        string code = InviteCode.Make(System.Net.IPAddress.Parse(ip), port);
+        Assert.Matches("^[0-9A-Z]{4}-[0-9A-Z]{4}$", code);
+        Assert.True(InviteCode.TryParse(code, out var back, out int p));
+        Assert.Equal(ip, back.ToString());
+        Assert.Equal(port, p);
+    }
+
+    [Fact]
+    public void ForgivesLookAlikesAndFormatting()
+    {
+        string code = InviteCode.Make(System.Net.IPAddress.Parse("203.0.113.7"), 47820);
+        string sloppy = code.ToLowerInvariant().Replace("-", " ").Replace('0', 'o').Replace('1', 'l');
+        Assert.True(InviteCode.TryParse(sloppy, out var ip, out _));
+        Assert.Equal("203.0.113.7", ip.ToString());
+    }
+
+    [Fact]
+    public void RejectsTyposAndOutOfRangePorts()
+    {
+        string code = InviteCode.Make(System.Net.IPAddress.Parse("203.0.113.7"), 47820);
+        char wrong = code[2] == 'A' ? 'B' : 'A';
+        string typo = code.Substring(0, 2) + wrong + code.Substring(3);
+        Assert.False(InviteCode.TryParse(typo, out _, out _));
+        Assert.False(InviteCode.TryParse("1.2.3.4", out _, out _));
+        Assert.Null(InviteCode.Make(System.Net.IPAddress.Parse("1.2.3.4"), 5000));
+    }
+
+    [Fact]
+    public void JoinTargetAcceptsCodesAndAddresses()
+    {
+        string code = InviteCode.Make(System.Net.IPAddress.Parse("198.51.100.20"), 47822);
+        Assert.Equal(("198.51.100.20", 47822), InviteCode.ResolveJoinTarget(code, 47820));
+        Assert.Equal(("26.1.2.3", 47820), InviteCode.ResolveJoinTarget("26.1.2.3", 47820));
+        Assert.Equal(("host.example", 5000), InviteCode.ResolveJoinTarget("host.example:5000", 47820));
+    }
+
+    [Theory]
+    [InlineData("10.0.0.1", true)]
+    [InlineData("172.16.5.4", true)]
+    [InlineData("172.32.0.1", false)]
+    [InlineData("192.168.1.10", true)]
+    [InlineData("100.64.0.1", true)]
+    [InlineData("100.128.0.1", false)]
+    [InlineData("169.254.1.1", true)]
+    [InlineData("203.0.113.7", false)]
+    public void ClassifiesNonPublicAddresses(string ip, bool nonPublic)
+    {
+        Assert.Equal(nonPublic, InviteCode.IsNonPublic(System.Net.IPAddress.Parse(ip)));
+    }
+
+    [Fact]
+    public void RoomKeysHashThePassword()
+    {
+        Assert.All(InviteCode.RoomKey(""), b => Assert.Equal(0, b));
+        Assert.Equal(InviteCode.RoomKey("knight"), InviteCode.RoomKey("knight"));
+        Assert.NotEqual(InviteCode.RoomKey("knight"), InviteCode.RoomKey("Knight"));
+        Assert.DoesNotContain((byte)0, InviteCode.RoomKey("knight").Take(4));
+    }
+}
+
+public class ResumeTests
+{
+    [Fact]
+    public void ResendsOwnInputsAfterReconnect()
+    {
+        var sent = new List<int>();
+        var info = new NetStartInfo { InputDelay = 2, SlotOwners = new byte[] { 1, 0, 255, 255 } };
+        var input = new NetInput(info, 1, (i, f) => default, (f, b) => sent.Add(f), (f, h) => { });
+        input.CanAdvance();        // sends frames 2..2
+        input.Receive(0, 1, NetProtocol.Quantize(default));
+        sent.Clear();
+        input.ResendAfter(-1);
+        Assert.Equal(new[] { 2 }, sent);
+        Assert.Equal(new[] { 0 }, input.WaitingForPeers().Where(id => id != 1).DefaultIfEmpty(0).Distinct());
+    }
+}

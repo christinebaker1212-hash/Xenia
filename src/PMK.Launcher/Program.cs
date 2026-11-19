@@ -87,6 +87,8 @@ namespace PMK.Launcher
         public int Seed;
         public bool Windowed;
         public int AutoStartPlayers;
+        public string Password;
+        public int DropAtFrame = -1;
 
         public static Options Parse(string[] args)
         {
@@ -110,6 +112,8 @@ namespace PMK.Launcher
                     case "--seed": o.Seed = int.Parse(Next()); break;
                     case "--windowed": o.Windowed = true; break;
                     case "--autostart": o.AutoStartPlayers = int.Parse(Next()); break;
+                    case "--password": o.Password = Next(); break;
+                    case "--drop-at": o.DropAtFrame = int.Parse(Next()); break;
                 }
             }
             return o;

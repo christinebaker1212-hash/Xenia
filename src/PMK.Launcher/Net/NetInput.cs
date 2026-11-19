@@ -25,6 +25,8 @@ namespace PMK.Launcher.Net
         private readonly Dictionary<int, GamePadState?[]> frames = new Dictionary<int, GamePadState?[]>();
         private readonly Dictionary<int, int> leftFrom = new Dictionary<int, int>(); // peer -> first frame without them
         private readonly List<int> localSlots = new List<int>();
+        // Own inputs already sent, kept so they can be sent again after a reconnect.
+        private readonly Dictionary<int, (int, GamePadState)[]> sentHistory = new Dictionary<int, (int, GamePadState)[]>();
         private int sentUpTo;
         private int stallTicks;
 
@@ -88,12 +90,31 @@ namespace PMK.Launcher.Net
                     Receive(sentUpTo, localSlots[i], st);
                 }
                 send(sentUpTo, batch);
+                sentHistory[sentUpTo] = batch;
+                sentHistory.Remove(sentUpTo - 3600);
                 sentUpTo++;
             }
         }
 
         private static GamePadState Idle(GamePadState s) =>
             s.IsConnected ? new GamePadState(Vector2.Zero, Vector2.Zero, 0f, 0f) : default;
+
+        /// <summary>Sends again every own input after <paramref name="lastReceivedByHost"/> (after a reconnect).</summary>
+        public void ResendAfter(int lastReceivedByHost)
+        {
+            for (int f = lastReceivedByHost + 1; f < sentUpTo; f++)
+                if (sentHistory.TryGetValue(f, out var batch)) send(f, batch);
+        }
+
+        /// <summary>Peer ids whose input the current frame is still waiting for.</summary>
+        public IEnumerable<int> WaitingForPeers()
+        {
+            frames.TryGetValue(Frame, out var arr);
+            var ids = new HashSet<int>();
+            for (int s = 0; s < 4; s++)
+                if (!SlotGone(s, Frame) && (arr == null || !arr[s].HasValue)) ids.Add(start.SlotOwners[s]);
+            return ids;
+        }
 
         public bool CanAdvance()
         {
