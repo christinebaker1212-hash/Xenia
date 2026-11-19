@@ -1,0 +1,10 @@
+# Game content and decompiled code are copyrighted: keep them out of git.
+extracted/
+decomp/
+*.xnb
+*.xwb
+*.xsb
+*.xgs
+*.exe
+*.dll
+__pycache__/
