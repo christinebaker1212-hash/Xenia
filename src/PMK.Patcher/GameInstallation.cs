@@ -64,15 +64,16 @@ namespace PMK.Patcher
                 throw new InvalidDataException("This package does not contain Protect Me Knight (AncHell.exe not found). "
                     + "Pick the game's own package from the 584E07D2\\00000002 folder, not the XNA launcher update.");
 
-            string staging = Path.Combine(DataDir, "extract.tmp");
-            if (Directory.Exists(staging)) Directory.Delete(staging, true);
-            pkg.ExtractAll(staging, log);
-
-            // The game lives in a sub-folder (584E07D1/); keep only that folder.
-            string exeDir = Path.GetDirectoryName(Path.Combine(staging, exe.Path.Replace('/', Path.DirectorySeparatorChar)));
-            if (Directory.Exists(GameDir)) Directory.Delete(GameDir, true);
-            Directory.Move(exeDir, GameDir);
-            Directory.Delete(staging, true);
+            // Extract the game folder (584E07D1/) straight into its final place.
+            // Never extract-then-move: Windows Defender scans new .exe/.dll files
+            // and holds them open, which makes a folder move fail with
+            // "Access denied" even for administrators.
+            if (File.Exists(ManifestPath)) FileUtil.DeleteFile(ManifestPath);
+            Manifest = null;
+            FileUtil.DeleteDirectory(Path.Combine(DataDir, "extract.tmp")); // leftover from older versions
+            FileUtil.DeleteDirectory(GameDir);
+            string prefix = exe.Path.Contains('/') ? exe.Path.Substring(0, exe.Path.LastIndexOf('/') + 1) : "";
+            pkg.ExtractSubtree(prefix, GameDir, log);
 
             Manifest = new InstallManifest
             {
@@ -88,7 +89,7 @@ namespace PMK.Patcher
             var relinker = new Relinker(GameDir);
             var inputs = Directory.GetFiles(GameDir).Where(f =>
                 f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
-            if (Directory.Exists(BinDir)) Directory.Delete(BinDir, true);
+            FileUtil.DeleteDirectory(BinDir);
             relinker.Run(inputs, BinDir);
             foreach (var line in relinker.Log) log?.Invoke(line);
             Manifest.PatchVersion = Relinker.PatchVersion;
@@ -116,6 +117,55 @@ namespace PMK.Patcher
             using var s = File.OpenRead(path);
             return Convert.ToHexString(SHA256.HashData(s));
         }
+    }
+
+    /// <summary>
+    /// File operations that tolerate Windows briefly locking freshly written
+    /// files (antivirus scans, search indexing, OneDrive sync).
+    /// </summary>
+    public static class FileUtil
+    {
+        public static void Retry(Action action, string what)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && attempt < 20)
+                {
+                    System.Threading.Thread.Sleep(250 + attempt * 100);
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    throw new IOException($"Could not {what}. Close any program using it (or pause antivirus/OneDrive sync) and try again. ({ex.Message})", ex);
+                }
+            }
+        }
+
+        public static void DeleteDirectory(string dir)
+        {
+            if (!Directory.Exists(dir)) return;
+            Retry(() =>
+            {
+                foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    var attr = File.GetAttributes(f);
+                    if ((attr & FileAttributes.ReadOnly) != 0) File.SetAttributes(f, attr & ~FileAttributes.ReadOnly);
+                }
+                Directory.Delete(dir, true);
+            }, "delete " + dir);
+        }
+
+        public static void DeleteFile(string path)
+        {
+            if (File.Exists(path)) Retry(() => File.Delete(path), "delete " + path);
+        }
+
+        public static void WriteAllBytes(string path, byte[] data) =>
+            Retry(() => File.WriteAllBytes(path, data), "write " + path);
     }
 
     public sealed class InstallManifest

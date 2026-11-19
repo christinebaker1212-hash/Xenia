@@ -219,7 +219,7 @@ namespace PMK.Launcher
             string staging = Path.Combine(dataDir, "update-staging");
             try
             {
-                if (Directory.Exists(staging)) Directory.Delete(staging, true);
+                Patcher.FileUtil.DeleteDirectory(staging);
                 Directory.CreateDirectory(staging);
                 string zip = Path.Combine(dataDir, "update.zip");
                 // Private repositories: assets must be fetched through the API with the token.
@@ -237,11 +237,11 @@ namespace PMK.Launcher
                 // Some zips wrap everything in one folder.
                 var entries = Directory.GetFileSystemEntries(staging);
                 string root = entries.Length == 1 && Directory.Exists(entries[0]) ? entries[0] : staging;
-                if (!File.Exists(Path.Combine(root, Path.GetFileName(Environment.ProcessPath))))
-                    throw new InvalidDataException("The update does not contain " + Path.GetFileName(Environment.ProcessPath));
+                if (!File.Exists(Path.Combine(root, AppInfo.AppFolderName, Path.GetFileName(Environment.ProcessPath))))
+                    throw new InvalidDataException("The update does not contain " + AppInfo.AppFolderName + "/" + Path.GetFileName(Environment.ProcessPath));
 
-                ApplyInPlace(root, AppInfo.InstallDir);
-                Directory.Delete(staging, true);
+                ApplyInPlace(root, AppInfo.RootDir);
+                Patcher.FileUtil.DeleteDirectory(staging);
                 Log.Write($"Updated to v{info.Version}");
                 statusLine = "Update installed - restarting";
                 game.Restart(null);
@@ -299,13 +299,16 @@ namespace PMK.Launcher
                     continue; // never overwrite user data
                 string dest = Path.Combine(installDir, rel);
                 Directory.CreateDirectory(Path.GetDirectoryName(dest));
-                if (File.Exists(dest))
+                Patcher.FileUtil.Retry(() =>
                 {
-                    string aside = dest + OldSuffix;
-                    if (File.Exists(aside)) File.Delete(aside);
-                    File.Move(dest, aside);
-                }
-                File.Move(src, dest);
+                    if (File.Exists(dest))
+                    {
+                        string aside = dest + OldSuffix;
+                        if (File.Exists(aside)) File.Delete(aside);
+                        File.Move(dest, aside);
+                    }
+                    File.Move(src, dest);
+                }, "replace " + rel);
             }
         }
 
@@ -316,7 +319,7 @@ namespace PMK.Launcher
             {
                 try { Process.GetProcessById(parentPid).WaitForExit(30000); } catch (ArgumentException) { }
                 Thread.Sleep(500);
-                ApplyInPlace(staging, AppInfo.InstallDir);
+                ApplyInPlace(staging, AppInfo.RootDir);
                 Process.Start(new ProcessStartInfo(Path.Combine(AppInfo.InstallDir, Path.GetFileName(Environment.ProcessPath))) { UseShellExecute = false });
                 return 0;
             }
@@ -332,7 +335,7 @@ namespace PMK.Launcher
         {
             try
             {
-                foreach (string f in Directory.GetFiles(AppInfo.InstallDir, "*" + OldSuffix, SearchOption.AllDirectories))
+                foreach (string f in Directory.GetFiles(AppInfo.RootDir, "*" + OldSuffix, SearchOption.AllDirectories))
                 {
                     try { File.Delete(f); } catch (Exception) { }
                 }

@@ -22,7 +22,27 @@ namespace PMK.Launcher
             typeof(AppInfo).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
                 .FirstOrDefault(a => a.Key == "UpdateRepository")?.Value ?? "";
 
+        /// <summary>Folder holding the program files (ProtectMeKnight.exe and its DLLs).</summary>
         public static string InstallDir => AppContext.BaseDirectory;
+
+        /// <summary>Name of the sub-folder releases keep the program files in.</summary>
+        public const string AppFolderName = "app";
+
+        /// <summary>
+        /// Top-level folder the user unzipped: holds the "Protect Me Knight"
+        /// launcher, "app" and "data". When run from a build folder (no "app"
+        /// parent) it is the program folder itself.
+        /// </summary>
+        public static string RootDir
+        {
+            get
+            {
+                string dir = Path.TrimEndingDirectorySeparator(InstallDir);
+                return string.Equals(Path.GetFileName(dir), AppFolderName, StringComparison.OrdinalIgnoreCase)
+                    ? Path.GetDirectoryName(dir)
+                    : dir;
+            }
+        }
 
         /// <summary>Release asset name for this platform.</summary>
         public static string AssetName =>
@@ -36,7 +56,7 @@ namespace PMK.Launcher
         {
             if (!string.IsNullOrEmpty(overrideDir))
                 return Path.GetFullPath(overrideDir);
-            string portable = Path.Combine(InstallDir, "data");
+            string portable = Path.Combine(RootDir, "data");
             try
             {
                 Directory.CreateDirectory(portable);

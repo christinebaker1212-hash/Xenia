@@ -2,5 +2,6 @@
   <Project Path="PMK.Compat/PMK.Compat.csproj" />
   <Project Path="PMK.Launcher/PMK.Launcher.csproj" />
   <Project Path="PMK.Patcher/PMK.Patcher.csproj" />
+  <Project Path="PMK.Stub/PMK.Stub.csproj" />
   <Project Path="PMK.Tests/PMK.Tests.csproj" />
 </Solution>

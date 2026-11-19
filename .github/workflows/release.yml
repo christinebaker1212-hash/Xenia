@@ -87,13 +87,26 @@ jobs:
       - name: Publish
         shell: bash
         run: |
+          # Layout: launcher + docs at the top, program files in app/, user data in data/ (created on first run).
           dotnet publish src/PMK.Launcher/PMK.Launcher.csproj -c Release -r ${{ matrix.rid }} --self-contained true \
             -p:Version=${{ needs.prepare.outputs.version }} \
             -p:UpdateRepository=${{ github.repository }} \
             -p:PublishReadyToRun=true \
-            -o out/${{ matrix.rid }}
-          cp README.md out/${{ matrix.rid }}/README.md
-          cp THIRD-PARTY-NOTICES.md out/${{ matrix.rid }}/THIRD-PARTY-NOTICES.md
+            -o out/${{ matrix.rid }}/app
+          cp README.md THIRD-PARTY-NOTICES.md out/${{ matrix.rid }}/
+
+      - name: Launcher (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          dotnet build src/PMK.Stub/PMK.Stub.csproj -c Release -p:Version=${{ needs.prepare.outputs.version }} -o stub
+          cp "stub/Protect Me Knight.exe" "out/${{ matrix.rid }}/Protect Me Knight.exe"
+
+      - name: Launcher (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/app/ProtectMeKnight" "$@"\n' > out/${{ matrix.rid }}/ProtectMeKnight
+          chmod +x out/${{ matrix.rid }}/ProtectMeKnight out/${{ matrix.rid }}/app/ProtectMeKnight
 
       - name: Zip (Windows)
         if: runner.os == 'Windows'
@@ -102,7 +115,7 @@ jobs:
 
       - name: Zip (Linux)
         if: runner.os != 'Windows'
-        run: cd out/${{ matrix.rid }} && chmod +x ProtectMeKnight && zip -qr ../../ProtectMeKnightPC-${{ matrix.rid }}.zip .
+        run: cd out/${{ matrix.rid }} && zip -qr ../../ProtectMeKnightPC-${{ matrix.rid }}.zip .
 
       - name: Attach to the draft release
         shell: bash

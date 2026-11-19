@@ -166,6 +166,34 @@ namespace PMK.Patcher
             return buf;
         }
 
+        /// <summary>
+        /// Extracts only the entries under <paramref name="prefix"/> (e.g. "584E07D1/")
+        /// into <paramref name="outDir"/>, without the prefix. Refuses unsafe paths.
+        /// </summary>
+        public void ExtractSubtree(string prefix, string outDir, Action<string> log = null)
+        {
+            string root = Path.GetFullPath(outDir);
+            Directory.CreateDirectory(root);
+            foreach (var e in Entries)
+            {
+                if (!e.Path.StartsWith(prefix, StringComparison.Ordinal) || e.Path.Length == prefix.Length) continue;
+                string rel = e.Path.Substring(prefix.Length);
+                string dest = Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
+                if (!dest.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                {
+                    log?.Invoke("Skipping unsafe path " + e.Path);
+                    continue;
+                }
+                if (e.IsDirectory)
+                {
+                    Directory.CreateDirectory(dest);
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                FileUtil.WriteAllBytes(dest, ReadFile(e));
+            }
+        }
+
         /// <summary>Extracts every file under <paramref name="outDir"/>, refusing unsafe paths.</summary>
         public void ExtractAll(string outDir, Action<string> log = null)
         {

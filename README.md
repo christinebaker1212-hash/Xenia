@@ -14,7 +14,15 @@ on your machine. It is for personal use; please don't redistribute the resulting
 1. Download `ProtectMeKnightPC-win-x64.zip` (or `-linux-x64.zip`) from the
    [latest release](../../releases/latest) and unzip it anywhere you can write to
    (not inside Program Files).
-2. Run `ProtectMeKnight.exe`.
+2. Run **`Protect Me Knight.exe`** (Linux: `./ProtectMeKnight`). The folder looks like this:
+
+   ```
+   Protect Me Knight\
+     Protect Me Knight.exe   <- start the game
+     app\                    <- program files (don't touch)
+     data\                   <- created on first run: your game copy, settings, logs
+     README.md
+   ```
 3. First-time setup looks for the game package in your Xenia content folder. If it
    doesn't find it, pick the file yourself. It is the 42-character file inside
    `...\584E07D2\00000002\`, for example
@@ -23,8 +31,9 @@ on your machine. It is for personal use; please don't redistribute the resulting
    Audio decoding uses ffmpeg; on Windows a copy is downloaded once if
    none is installed. On Linux, install `ffmpeg` with your package manager.
 
-Everything the installer creates lives in the `data` folder next to the program
-(or `%LOCALAPPDATA%\ProtectMeKnightPC` if that folder isn't writable).
+Everything the installer creates lives in the `data` folder (or
+`%LOCALAPPDATA%\ProtectMeKnightPC` if that folder isn't writable). To redo setup,
+delete `data\install.json` (or the whole `data` folder).
 
 ### Controls
 

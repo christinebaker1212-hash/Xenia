@@ -41,7 +41,7 @@ namespace PMK.Patcher
                     switch (e.Codec)
                     {
                         case WaveCodec.Pcm:
-                            File.WriteAllBytes(outFile, BuildPcmWav(e, payload, bank.BigEndian));
+                            FileUtil.WriteAllBytes(outFile, BuildPcmWav(e, payload, bank.BigEndian));
                             break;
                         case WaveCodec.Xma:
                             {
