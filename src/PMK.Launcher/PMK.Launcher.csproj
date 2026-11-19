@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>ProtectMeKnight</AssemblyName>
+    <RootNamespace>PMK.Launcher</RootNamespace>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Repository the in-game updater checks; the release workflow overrides it. -->
+    <UpdateRepository>christinebaker1212-hash/Xenia</UpdateRepository>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="UpdateRepository" Value="$(UpdateRepository)" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Mono.Nat" Version="3.0.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PMK.Compat\PMK.Compat.csproj" />
+    <ProjectReference Include="..\PMK.Patcher\PMK.Patcher.csproj" />
+  </ItemGroup>
+  <!-- FNA.NET copies its native-library map on build only; publish needs it too (Linux/macOS). -->
+  <Target Name="CopyFnaDllMapOnPublish" AfterTargets="Publish">
+    <Copy SourceFiles="$(TargetDir)FNA.NET.dll.config" DestinationFolder="$(PublishDir)" Condition="Exists('$(TargetDir)FNA.NET.dll.config')" />
+  </Target>
+</Project>
