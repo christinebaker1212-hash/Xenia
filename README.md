@@ -114,7 +114,7 @@ relink test in `dotnet test`.
 
 ### Releasing
 
-Push a tag such as `v1.0.0`. The **Release** workflow tests, publishes self-contained
+Change the `VERSION` file (for example to `1.0.0`) and push, or push a tag such as `v1.0.0`. The **Release** workflow tests, publishes self-contained
 Windows and Linux builds, and attaches `ProtectMeKnightPC-win-x64.zip` and
 `ProtectMeKnightPC-linux-x64.zip` to a GitHub release. Those asset names are what the
 in-game updater looks for. You can also run the workflow manually with a version
