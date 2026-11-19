@@ -79,5 +79,6 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
           name: Protect Me Knight PC ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: dist/*.zip
