@@ -733,7 +733,9 @@ namespace PMK.Launcher
                 return;
 
             InputRouter.LatchFrame();
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             guest.HostUpdate(gameTime);
+            Profiling.RecordUpdate(System.Diagnostics.Stopwatch.GetTimestamp() - t0);
             net?.Input.AfterFrame();
             RenderGuest(gameTime);
         }
