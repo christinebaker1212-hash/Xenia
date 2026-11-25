@@ -59,6 +59,17 @@ Window size (1×–8× of 640×360), fullscreen, VSync, sharp or smooth (Xbox-st
 pixels, integer scaling, music and sound volume, vibration, keyboard player and key
 bindings, online settings, automatic update checks. Saved in `data/settings.json`.
 
+## Game modes
+
+*Select game mode* (after everyone has joined) offers four modes:
+
+| Mode | |
+|---|---|
+| **ARCADE** | The original game: ten stages on the difficulty you choose, then the ending. |
+| **SURVIVE** | The original survival mode. |
+| **ENDLESS** | Arcade stages on **HELL** with no ending. After stage 10 the stages repeat in order (stage 11 is stage 1, stage 20 is stage 10, and so on), and every stage past stage 10 brings 25% more of each stage's monsters: stage 11 has 125%, stage 12 150%, stage 20 350%. The final boss is never doubled. Game over works like Arcade: retry the stage or quit. |
+| **REMIX** | Greyed out for now. It will be the modded game, with new characters and stages. |
+
 ## Online play
 
 Up to 4 players over the internet or a home network, with any mix of players per
@@ -169,6 +180,9 @@ machine code, so no emulation or recompilation is needed.
 | Textures and fonts | FNA reads the original Xbox 360 XNB files directly (LZX decompression, byte-swapping), so no asset conversion is needed. |
 | `PMK.Patcher/AudioConverter.cs` | The Xbox wave banks are XMA, which FNA can't play. Each sound is wrapped in an XMA2 RIFF header and decoded once by ffmpeg to WAV. Cue structure, playlists and loop points still come from the original banks. |
 | `PMK.Launcher` | Window, scaling, menus, settings, setup, lockstep netplay (`Net/`), updater. |
+| `PMK.Mods` | Gameplay additions such as the mode select with ENDLESS and REMIX. Static methods marked `[Hook("Game.Type", "Method")]` run before (or, as `Postfix`, after) a game method; a prefix that returns `false` replaces it. New menu words are drawn at run time from the letters in your copy of the game's menu textures, with missing letters (X) generated in the same style. |
+| `PMK.GameApi` | Declarations only (names, signatures and enum values) of the game members `PMK.Mods` uses, so it compiles without any game code. Never loaded at run time. |
+| `PMK.Patcher/ModLinker.cs` | During setup, points `PMK.Mods` at the real game, checks that every name, signature and enum value it uses matches the game (setup stops with a clear error otherwise), makes those members accessible and splices the hook calls into the game code. Setup re-runs automatically when the mods change. |
 
 The game renders at 640×360; the port scales it by an integer factor without
 resampling. Each game frame is drawn exactly once per update (like the Xbox's fixed

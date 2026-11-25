@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Declarations-only stand-in for the parts of the game (AncHell) that
+    PMK.Mods uses: names and signatures, no game code. PMK.Mods compiles
+    against it; at install time ModLinker points PMK.Mods at the real,
+    relinked game and checks that every name, signature and enum value
+    declared here matches. Never loaded at run time.
+  -->
+  <PropertyGroup>
+    <RootNamespace>AncHell</RootNamespace>
+    <AssemblyVersion>0.0.0.0</AssemblyVersion>
+    <NoWarn>$(NoWarn);CS0649;CS8981</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PMK.Compat\PMK.Compat.csproj" />
+  </ItemGroup>
+</Project>

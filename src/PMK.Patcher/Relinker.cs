@@ -16,7 +16,7 @@ namespace PMK.Patcher
     public sealed class Relinker
     {
         /// <summary>Bump when the relinking rules or PMK.Compat's surface change.</summary>
-        public const int PatchVersion = 1;
+        public const int PatchVersion = 2;
 
         private const string Fna = "FNA.NET";
         private const string Compat = "PMK.Compat";
@@ -71,6 +71,9 @@ namespace PMK.Patcher
         private readonly List<string> searchDirs = new List<string>();
         public List<string> Log { get; } = new List<string>();
 
+        /// <summary>Folder holding PMK.Mods.dll and PMK.GameApi.dll; null installs the game without mods.</summary>
+        public string ModsDir { get; set; }
+
         public Relinker(params string[] extraSearchDirs)
         {
             searchDirs.Add(Path.GetDirectoryName(typeof(PMK.Compat.Game).Assembly.Location));
@@ -99,6 +102,12 @@ namespace PMK.Patcher
                     InMemory = true,
                 });
                 RelinkModule(module);
+                if (ModsDir != null && module.GetType("AncHell", "Main") != null)
+                {
+                    var mods = new ModLinker(resolver);
+                    mods.Apply(module, ModsDir, outDir);
+                    Log.AddRange(mods.Log);
+                }
                 string outPath = Path.Combine(outDir, Path.GetFileNameWithoutExtension(input) + ".dll");
                 module.Write(outPath);
                 Log.Add($"Relinked {Path.GetFileName(input)} -> {Path.GetFileName(outPath)}");

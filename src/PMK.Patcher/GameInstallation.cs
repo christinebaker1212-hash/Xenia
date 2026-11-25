@@ -20,6 +20,18 @@ namespace PMK.Patcher
         public string GameDir => Path.Combine(DataDir, "game");
         public string BinDir => Path.Combine(DataDir, "bin");
         public string ManifestPath => Path.Combine(DataDir, "install.json");
+
+        /// <summary>Where the launcher ships PMK.Mods (see Mods.targets); null to install without mods.</summary>
+        public string ModsDir { get; set; } = DefaultModsDir;
+
+        public static string DefaultModsDir
+        {
+            get
+            {
+                string dir = Path.Combine(AppContext.BaseDirectory, "mods");
+                return File.Exists(Path.Combine(dir, ModLinker.ModsAssemblyName + ".dll")) ? dir : null;
+            }
+        }
         public InstallManifest Manifest { get; private set; }
 
         public GameInstallation(string dataDir)
@@ -30,7 +42,17 @@ namespace PMK.Patcher
 
         public bool IsExtracted => Manifest != null && File.Exists(Path.Combine(GameDir, GameExe));
         public bool NeedsRelink => !IsExtracted || Manifest.PatchVersion != Relinker.PatchVersion
-            || !File.Exists(Path.Combine(BinDir, "AncHell.dll"));
+            || !File.Exists(Path.Combine(BinDir, "AncHell.dll"))
+            || (Manifest.ModsSha256 ?? "") != ModsHash();
+
+        /// <summary>Changes whenever the shipped mods change, so they are re-applied after an update.</summary>
+        private string ModsHash()
+        {
+            if (ModsDir == null) return "";
+            var files = new[] { ModLinker.ModsAssemblyName, ModLinker.GameApiAssemblyName }
+                .Select(n => Path.Combine(ModsDir, n + ".dll")).Where(File.Exists);
+            return string.Join("+", files.Select(Sha256));
+        }
         public bool NeedsAudio => !IsExtracted || Manifest.AudioVersion != AudioConverter.AudioVersion;
         public bool IsReady => IsExtracted && !NeedsRelink && !NeedsAudio;
 
@@ -86,13 +108,14 @@ namespace PMK.Patcher
 
         public void Relink(Action<string> log)
         {
-            var relinker = new Relinker(GameDir);
+            var relinker = new Relinker(GameDir) { ModsDir = ModsDir };
             var inputs = Directory.GetFiles(GameDir).Where(f =>
                 f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
             FileUtil.DeleteDirectory(BinDir);
             relinker.Run(inputs, BinDir);
             foreach (var line in relinker.Log) log?.Invoke(line);
             Manifest.PatchVersion = Relinker.PatchVersion;
+            Manifest.ModsSha256 = ModsHash();
             SaveManifest();
         }
 
@@ -174,6 +197,7 @@ namespace PMK.Patcher
         public string GameExeSha256 { get; set; }
         public DateTime InstalledUtc { get; set; }
         public int PatchVersion { get; set; }
+        public string ModsSha256 { get; set; }
         public int AudioVersion { get; set; }
     }
 }

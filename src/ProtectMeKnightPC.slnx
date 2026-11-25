@@ -1,6 +1,8 @@
 <Solution>
   <Project Path="PMK.Compat/PMK.Compat.csproj" />
+  <Project Path="PMK.GameApi/PMK.GameApi.csproj" />
   <Project Path="PMK.Launcher/PMK.Launcher.csproj" />
+  <Project Path="PMK.Mods/PMK.Mods.csproj" />
   <Project Path="PMK.Patcher/PMK.Patcher.csproj" />
   <Project Path="PMK.Stub/PMK.Stub.csproj" />
   <Project Path="PMK.Tests/PMK.Tests.csproj" />

@@ -1,0 +1,18 @@
+<Project>
+  <!--
+    Ships PMK.Mods.dll and PMK.GameApi.dll in a mods/ subfolder of the output
+    (and publish) folder. They are not referenced as normal assemblies: the
+    installer retargets PMK.Mods to the user's game and copies that version
+    into data/bin, which is the only copy ever loaded.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)PMK.Mods\PMK.Mods.csproj" ReferenceOutputAssembly="false" OutputItemType="PmkModAssembly" />
+    <ProjectReference Include="$(MSBuildThisFileDirectory)PMK.GameApi\PMK.GameApi.csproj" ReferenceOutputAssembly="false" OutputItemType="PmkModAssembly" />
+  </ItemGroup>
+  <Target Name="PmkAddModAssemblies" AfterTargets="ResolveProjectReferences" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <ContentWithTargetPath Include="@(PmkModAssembly)" TargetPath="mods\%(Filename)%(Extension)"
+                             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+</Project>

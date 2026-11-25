@@ -17,6 +17,7 @@
     <ProjectReference Include="..\PMK.Compat\PMK.Compat.csproj" />
     <ProjectReference Include="..\PMK.Patcher\PMK.Patcher.csproj" />
   </ItemGroup>
+  <Import Project="..\Mods.targets" />
   <!-- FNA.NET copies its native-library map on build only; publish needs it too (Linux/macOS). -->
   <Target Name="CopyFnaDllMapOnPublish" AfterTargets="Publish">
     <Copy SourceFiles="$(TargetDir)FNA.NET.dll.config" DestinationFolder="$(PublishDir)" Condition="Exists('$(TargetDir)FNA.NET.dll.config')" />

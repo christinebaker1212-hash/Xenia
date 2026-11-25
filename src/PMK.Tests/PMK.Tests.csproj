@@ -15,5 +15,8 @@
     <ProjectReference Include="..\PMK.Compat\PMK.Compat.csproj" />
     <ProjectReference Include="..\PMK.Patcher\PMK.Patcher.csproj" />
     <ProjectReference Include="..\PMK.Launcher\PMK.Launcher.csproj" />
+    <!-- For EndlessTests' pure helpers only; the game-facing parts need an installed game. -->
+    <ProjectReference Include="..\PMK.Mods\PMK.Mods.csproj" />
   </ItemGroup>
+  <Import Project="..\Mods.targets" />
 </Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Gameplay mods. Compiled against PMK.GameApi (declarations only); at
+    install time ModLinker retargets this assembly to the real game and
+    splices calls to its [Hook] methods into the game code. The launcher
+    ships it in app/mods/, outside the normal probing paths, so only the
+    retargeted copy in data/bin is ever loaded.
+  -->
+  <PropertyGroup>
+    <RootNamespace>PMK.Mods</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PMK.Compat\PMK.Compat.csproj" Private="false" />
+    <ProjectReference Include="..\PMK.GameApi\PMK.GameApi.csproj" Private="false" />
+  </ItemGroup>
+</Project>
