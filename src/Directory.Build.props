@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- Overridden by the release workflow from the git tag. -->
+    <Version>0.1.0</Version>
+    <Authors>Protect Me Knight PC port contributors</Authors>
+    <Product>Protect Me Knight PC (unofficial port)</Product>
+  </PropertyGroup>
+</Project>

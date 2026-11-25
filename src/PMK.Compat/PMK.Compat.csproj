@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>PMK.Compat</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="FNA.NET" Version="2.2.11.2602" />
+  </ItemGroup>
+</Project>

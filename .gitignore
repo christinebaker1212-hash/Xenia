@@ -8,3 +8,12 @@ decomp/
 *.exe
 *.dll
 __pycache__/
+
+# Build output and local game data created by the installer.
+bin/
+obj/
+out/
+data/
+*.wav
+*.zip
+TestResults/
